@@ -48,6 +48,12 @@ WEBHOOK_SECRET = _webhook_secret
 PORT = int(os.getenv("PORT", "8080"))
 USE_WEBHOOK = bool(WEBHOOK_URL)
 
+# --- Оптовики и заявки в Google-таблице (резервное хранилище + ручное редактирование) ---
+# Если WHOLESALE_SHEET_ID пуст, всё работает как раньше: только SQLite и wholesalers.json.
+WHOLESALE_SHEET_ID = os.getenv("WHOLESALE_SHEET_ID", "").strip()
+WHOLESALE_TAB_WHOLESALERS = os.getenv("WHOLESALE_TAB_WHOLESALERS", "Оптовики").strip() or "Оптовики"
+WHOLESALE_TAB_REQUESTS = os.getenv("WHOLESALE_TAB_REQUESTS", "Заявки").strip() or "Заявки"
+
 # Для распознавания строк-разделителей в прайсе.
 MENU_CATEGORIES = (
     "Блоки питания", "Видеокарты", "Жесткие диски и SSD", "Материнские платы",

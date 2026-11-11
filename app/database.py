@@ -138,6 +138,11 @@ class Database:
                 FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
             );
             CREATE INDEX IF NOT EXISTS idx_requests_status ON wholesale_requests(status,id DESC);
+            CREATE TABLE IF NOT EXISTS wholesaler_revocations (
+                telegram_id INTEGER PRIMARY KEY,
+                revoked_at TEXT NOT NULL,
+                revoked_by INTEGER
+            );
             """)
 
     def import_prices(self, products_file: Path, other_prices_file: Path) -> tuple[int, int]:
@@ -385,15 +390,88 @@ class Database:
                         "approved_by": admin_id,
                     }
                     self._write_wholesalers(users)
+                    # Повторное одобрение снимает прошлый отзыв доступа.
+                    conn.execute("DELETE FROM wholesaler_revocations WHERE telegram_id=?",
+                                 (row["telegram_id"],))
                 conn.execute("""
                     UPDATE wholesale_requests SET status=?,reviewed_at=?,reviewed_by=? WHERE id=?
                 """, ("approved" if approve else "rejected", utc_now(), admin_id, request_id))
                 return dict(row)
 
-    def remove_wholesaler(self, telegram_id: int) -> bool:
+    def remove_wholesaler(self, telegram_id: int, admin_id: int | None = None) -> bool:
         with self._lock:
             users = self._read_wholesalers()
             if users.pop(str(telegram_id), None) is None:
                 return False
             self._write_wholesalers(users)
+            self.record_revocation(telegram_id, admin_id)
             return True
+
+    def record_revocation(self, telegram_id: int, admin_id: int | None = None,
+                          revoked_at: str | None = None) -> None:
+        """Отзыв сохраняется отдельно, чтобы он не потерялся при синхронизации с таблицей."""
+        with self.connect() as conn:
+            conn.execute("""
+                INSERT INTO wholesaler_revocations(telegram_id,revoked_at,revoked_by)
+                VALUES(?,?,?)
+                ON CONFLICT(telegram_id) DO UPDATE SET
+                    revoked_at=excluded.revoked_at, revoked_by=excluded.revoked_by
+            """, (telegram_id, revoked_at or utc_now(), admin_id))
+
+    def revocation_dates(self) -> dict[str, str]:
+        with self.connect() as conn:
+            return {str(r["telegram_id"]): r["revoked_at"]
+                    for r in conn.execute("SELECT telegram_id, revoked_at FROM wholesaler_revocations")}
+
+    def revoked_wholesalers(self) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute("""
+                SELECT r.telegram_id, r.revoked_at, r.revoked_by,
+                       COALESCE(u.full_name,'') AS full_name,
+                       COALESCE(u.username,'') AS username
+                FROM wholesaler_revocations r
+                LEFT JOIN users u ON u.telegram_id=r.telegram_id
+                ORDER BY r.telegram_id
+            """).fetchall()
+            return [dict(r) for r in rows]
+
+    def replace_wholesalers(self, data: dict[str, dict]) -> None:
+        """Полная замена реестра (используется при восстановлении из Google-таблицы)."""
+        with self._lock:
+            self._write_wholesalers(data)
+
+    def all_requests(self) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute("""
+                SELECT r.*, u.full_name, u.username FROM wholesale_requests r
+                LEFT JOIN users u ON u.telegram_id=r.telegram_id
+                ORDER BY r.id
+            """).fetchall()
+            return [dict(r) for r in rows]
+
+    def upsert_request(self, row: dict) -> None:
+        """Восстанавливает заявку с тем же ID из Google-таблицы."""
+        with self.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM wholesale_requests WHERE id=?",
+                                  (row["id"],)).fetchone()
+            values = (row["telegram_id"], row["status"], row.get("created_at") or utc_now(),
+                      row.get("reviewed_at"), row.get("reviewed_by"))
+            if exists:
+                conn.execute("""
+                    UPDATE wholesale_requests SET telegram_id=?,status=?,created_at=?,
+                        reviewed_at=?,reviewed_by=? WHERE id=?
+                """, (*values, row["id"]))
+            else:
+                conn.execute("""
+                    INSERT INTO wholesale_requests(id,telegram_id,status,created_at,reviewed_at,reviewed_by)
+                    VALUES(?,?,?,?,?,?)
+                """, (row["id"], *values))
+            # Имя и username нужны для отображения истории из таблицы.
+            if row.get("full_name") or row.get("username"):
+                now = utc_now()
+                conn.execute("""
+                    INSERT INTO users(telegram_id,full_name,username,first_seen,last_seen)
+                    VALUES(?,?,?,?,?)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        full_name=excluded.full_name, username=excluded.username
+                """, (row["telegram_id"], row.get("full_name") or "", row.get("username") or "", now, now))

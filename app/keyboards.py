@@ -109,6 +109,7 @@ def admin_home_keyboard() -> InlineKeyboardMarkup:
         ("📤 Выгрузить оптовиков (JSON)", "adm:export"),
         ("📥 Оптовики для Excel (CSV)", "adm:exportcsv"),
         ("🔄 Обновить Google-таблицу", "adm:reload"),
+        ("☁️ Выгрузить оптовиков в таблицу", "adm:sheetpush"),
         ("🔎 Посмотреть столбцы прайса 379", "adm:headers"),
         ("🔎 Посмотреть начало прайса 482", "adm:otherheaders"),
         ("🏠 Главное меню", "home"),

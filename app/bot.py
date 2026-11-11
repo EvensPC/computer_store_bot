@@ -24,6 +24,7 @@ from .config import (ADMIN_IDS, BOT_TOKEN, DB_PATH, OTHER_PRICES_PATH,
 from .database import Database
 from .dns_photos import product_photo
 from .sheet_sync import GoogleSheetSync
+from .wholesale_sheet import WholesaleSheet
 from .keyboards import (admin_home_keyboard, categories_keyboard,
                         comparison_keyboard, main_keyboard, money, product_keyboard,
                         products_keyboard, profile_keyboard, review_keyboard,
@@ -33,6 +34,7 @@ log = logging.getLogger(__name__)
 router = Router()
 db = Database(DB_PATH, WHOLESALERS_PATH)
 sheet_sync = GoogleSheetSync(db)
+wholesale_sheet = WholesaleSheet(db)
 # Последний поисковый запрос хранится в памяти. Оптовые доступы и заявки — только на диске.
 last_search: dict[int, str] = {}
 
@@ -97,11 +99,19 @@ async def show_admin_home(message: Message, user_id: int):
         await message.answer("⛔ Доступ только для администратора.")
         return
     pending, count = db.requests(pending_only=True)
+    if wholesale_sheet.enabled:
+        sheet_state = wholesale_sheet.last_success or "ещё не выгружались"
+        if wholesale_sheet.last_error:
+            sheet_state += f" | ошибка: {wholesale_sheet.last_error[:150]}"
+        wholesale_line = f"\n☁️ Оптовики в Google-таблице: {escape(sheet_state)}"
+    else:
+        wholesale_line = "\n☁️ Google-таблица для оптовиков не настроена (WHOLESALE_SHEET_ID)"
     await message.answer(
         f"🛠 <b>Админ-панель</b>\nОжидают решения: <b>{count}</b>\n"
         f"Оптовиков в реестре: <b>{len(db.wholesalers())}</b>\n"
-        f"Google Sheets: {escape(sheet_sync.last_success or 'ещё не синхронизирована')}\n"
-        + (f"Последняя ошибка: {escape(sheet_sync.last_error[:250])}" if sheet_sync.last_error else ""),
+        f"Google Sheets: {escape(sheet_sync.last_success or 'ещё не синхронизирована')}"
+        + wholesale_line
+        + (f"\nПоследняя ошибка: {escape(sheet_sync.last_error[:250])}" if sheet_sync.last_error else ""),
         reply_markup=admin_home_keyboard(),
     )
 
@@ -145,6 +155,7 @@ async def apply_for_wholesale(message: Message, user):
     if not is_new:
         await message.answer(f"⏳ Ваша заявка №{request['id']} уже ожидает решения администратора.")
         return
+    asyncio.create_task(sync_wholesale_sheet())
     await message.answer(
         f"✅ Заявка №{request['id']} отправлена!\n"
         "После одобрения оптовые цены автоматически появятся в карточках товаров."
@@ -463,6 +474,7 @@ async def callback_admin(query: CallbackQuery):
         if row is None:
             await query.message.answer("Эта заявка уже обработана или не существует.")
             return
+        asyncio.create_task(sync_wholesale_sheet())
         approved = action == "approve"
         await query.message.answer(
             f"{'✅ Одобрена' if approved else '❌ Отклонена'} заявка №{request_id} "
@@ -482,13 +494,30 @@ async def callback_admin(query: CallbackQuery):
         except (IndexError, ValueError):
             await query.message.answer("Некорректный ID.")
             return
-        removed = db.remove_wholesaler(user_id)
+        removed = db.remove_wholesaler(user_id, query.from_user.id)
         await query.message.answer("✅ Оптовый доступ отозван." if removed else "Этот пользователь уже исключён из списка.")
         if removed:
+            asyncio.create_task(sync_wholesale_sheet())
             try:
                 await query.bot.send_message(user_id, "Ваш оптовый доступ был отозван администратором.")
             except TelegramAPIError:
                 pass
+        return
+    if action == "sheetpush":
+        if not wholesale_sheet.enabled:
+            await query.message.answer(
+                "☁️ Google-таблица для оптовиков не настроена.\n"
+                "Задайте WHOLESALE_SHEET_ID и GOOGLE_SERVICE_ACCOUNT_FILE в .env."
+            )
+            return
+        try:
+            active, total = await asyncio.to_thread(wholesale_sheet.push)
+        except Exception as exc:
+            await query.message.answer(f"❌ Не удалось выгрузить: {escape(str(exc)[:300])}")
+            return
+        await query.message.answer(
+            f"☁️ Выгружено в Google-таблицу: оптовиков {active}, заявок {total}."
+        )
         return
     if action == "export":
         await query.message.answer_document(
@@ -557,6 +586,28 @@ async def periodic_sync():
             log.info("Google Sheets обновлена: %d товаров, %d цен сравнения", count, other)
         except Exception as exc:
             log.warning("Плановая синхронизация не удалась (старый каталог сохранён): %s", exc)
+        await sync_wholesale_sheet()
+
+
+async def sync_wholesale_sheet():
+    """Выгрузка оптовиков и заявок в Google-таблицу. Не блокирует ответ пользователю."""
+    if not wholesale_sheet.enabled:
+        return
+    try:
+        await asyncio.to_thread(wholesale_sheet.push)
+    except Exception as exc:
+        log.warning("Не удалось записать оптовиков и заявки в Google-таблицу: %s", exc)
+
+
+async def restore_wholesale_state():
+    """При старте подтягивает оптовиков и заявки из Google-таблицы (восстановление после передеплоя)."""
+    if not wholesale_sheet.enabled:
+        return
+    try:
+        active, requests = await asyncio.to_thread(wholesale_sheet.restore_and_push)
+        log.info("Восстановление из таблицы завершено: %d оптовиков, %d заявок", active, requests)
+    except Exception as exc:
+        log.warning("Не удалось восстановить оптовиков из Google-таблицы: %s", exc)
 
 
 async def _initial_sync():
@@ -572,13 +623,14 @@ async def _run_polling(bot: Bot, dp: Dispatcher):
     """Режим long polling: VPS, локальный запуск, Background Worker."""
     sync_task = asyncio.create_task(_initial_sync())
     periodic_task = asyncio.create_task(periodic_sync())
+    restore_task = asyncio.create_task(restore_wholesale_state())
     try:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot)
     finally:
-        sync_task.cancel()
-        periodic_task.cancel()
-        await asyncio.gather(sync_task, periodic_task, return_exceptions=True)
+        for task in (sync_task, periodic_task, restore_task):
+            task.cancel()
+        await asyncio.gather(sync_task, periodic_task, restore_task, return_exceptions=True)
 
 
 async def _run_webhook(bot: Bot, dp: Dispatcher):
@@ -590,6 +642,7 @@ async def _run_webhook(bot: Bot, dp: Dispatcher):
     webhook_full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     sync_task = asyncio.create_task(_initial_sync())
     periodic_task = asyncio.create_task(periodic_sync())
+    restore_task = asyncio.create_task(restore_wholesale_state())
 
     async def health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "computer_store_bot"})
@@ -637,9 +690,9 @@ async def _run_webhook(bot: Bot, dp: Dispatcher):
         await stop_event.wait()
     finally:
         log.info("Останавливаю webhook-сервер")
-        sync_task.cancel()
-        periodic_task.cancel()
-        await asyncio.gather(sync_task, periodic_task, return_exceptions=True)
+        for task in (sync_task, periodic_task, restore_task):
+            task.cancel()
+        await asyncio.gather(sync_task, periodic_task, restore_task, return_exceptions=True)
         try:
             await bot.delete_webhook(drop_pending_updates=False)
         except Exception as exc:  # сеть может уже отсутствовать при остановке

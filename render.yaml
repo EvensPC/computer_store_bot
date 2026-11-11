@@ -26,6 +26,16 @@ services:
         value: "0"
       - key: SYNC_INTERVAL_MINUTES
         value: "15"
+      # ID отдельной Google-таблицы для оптовиков и заявок.
+      # Оставьте пустым, если хотите хранить их только на диске.
+      - key: WHOLESALE_SHEET_ID
+        sync: false
+      # Для записи в Google-таблицу нужен сервисный аккаунт.
+      # 1) Render → ваш сервис → Environment → Secret Files:
+      #    file name: google-service-account.json, mount path: /app/secrets
+      # 2) Раскомментируйте переменную ниже.
+      # - key: GOOGLE_SERVICE_ACCOUNT_FILE
+      #   value: /app/secrets/google-service-account.json
     # Постоянный диск, чтобы не терять data/bot.sqlite3 и data/wholesalers.json
     # при пересборке. На плане free диски недоступны — раскомментируйте после
     # перехода на платный план (Starter и выше).

@@ -212,6 +212,10 @@ class Database:
             return [r[0] for r in conn.execute(
                 "SELECT DISTINCT subcategory FROM products WHERE category=? ORDER BY subcategory", (category,))]
 
+    def count_all_products(self) -> int:
+        with self.connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM products").fetchone()[0])
+
     def count_products(self, category: str, subcategory: str | None = None) -> int:
         sql = "SELECT COUNT(*) FROM products WHERE category=?"
         args = [category]

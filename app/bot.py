@@ -625,7 +625,10 @@ async def _run_polling(bot: Bot, dp: Dispatcher):
     periodic_task = asyncio.create_task(periodic_sync())
     restore_task = asyncio.create_task(restore_wholesale_state())
     try:
-        await bot.delete_webhook(drop_pending_updates=False)
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+        except Exception as exc:
+            log.warning("Не удалось снять webhook перед polling: %s", exc)
         await dp.start_polling(bot)
     finally:
         for task in (sync_task, periodic_task, restore_task):
@@ -647,6 +650,22 @@ async def _run_webhook(bot: Bot, dp: Dispatcher):
     async def health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "computer_store_bot"})
 
+    async def status(request: web.Request) -> web.Response:
+        """Диагностика без секретов: видно, что env подхватились."""
+        return web.json_response({
+            "bot_token_set": bool(BOT_TOKEN),
+            "admins": len(ADMIN_IDS),
+            "webhook_mode": True,
+            "port": PORT,
+            "webhook_url": webhook_full_url,
+            "products": db.count_all_products(),
+            "wholesalers": len(db.wholesalers()),
+            "sheet_last_success": sheet_sync.last_success,
+            "sheet_last_error": sheet_sync.last_error,
+            "wholesale_sheet_enabled": wholesale_sheet.enabled,
+            "wholesale_sheet_last_error": wholesale_sheet.last_error,
+        })
+
     app = web.Application()
     SimpleRequestHandler(
         dispatcher=dp,
@@ -655,24 +674,34 @@ async def _run_webhook(bot: Bot, dp: Dispatcher):
     ).register(app, path=WEBHOOK_PATH)
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
+    app.router.add_get("/status", status)
 
-    async def on_startup(_: web.Application) -> None:
-        await bot.set_webhook(
-            webhook_full_url,
-            secret_token=WEBHOOK_SECRET or None,
-            drop_pending_updates=False,
-            allowed_updates=dp.resolve_used_update_types(),
-        )
-        log.info("Webhook установлен: %s", webhook_full_url)
-
-    app.on_startup.append(on_startup)
     setup_application(app, dp, bot=bot)
+
+    async def install_webhook() -> None:
+        """Ставит webhook с повторами: падение Telegram не должно убивать контейнер."""
+        delay = 5
+        while True:
+            try:
+                await bot.set_webhook(
+                    webhook_full_url,
+                    secret_token=WEBHOOK_SECRET or None,
+                    drop_pending_updates=False,
+                    allowed_updates=dp.resolve_used_update_types(),
+                )
+                log.info("Webhook установлен: %s", webhook_full_url)
+                return
+            except Exception as exc:
+                log.error("Не удалось установить webhook (%s). Повтор через %s с", exc, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 300)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     log.info("HTTP-сервер слушает 0.0.0.0:%s", PORT)
+    webhook_task = asyncio.create_task(install_webhook())
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -690,9 +719,11 @@ async def _run_webhook(bot: Bot, dp: Dispatcher):
         await stop_event.wait()
     finally:
         log.info("Останавливаю webhook-сервер")
-        for task in (sync_task, periodic_task, restore_task):
+        webhook_task.cancel()
+        for task in (sync_task, periodic_task, restore_task, webhook_task):
             task.cancel()
-        await asyncio.gather(sync_task, periodic_task, restore_task, return_exceptions=True)
+        await asyncio.gather(sync_task, periodic_task, restore_task, webhook_task,
+                             return_exceptions=True)
         try:
             await bot.delete_webhook(drop_pending_updates=False)
         except Exception as exc:  # сеть может уже отсутствовать при остановке

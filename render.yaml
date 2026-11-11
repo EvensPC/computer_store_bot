@@ -1,0 +1,35 @@
+# Конфигурация развёртывания на Render (https://render.com).
+# Схема: New → Blueprint → подключить этот репозиторий.
+#
+# Бот работает как обычный Web Service через webhook: Render сам передаёт
+# RENDER_EXTERNAL_URL и PORT, поэтому отдельная настройка не нужна.
+services:
+  - type: web
+    name: computer-store-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    healthCheckPath: /healthz
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        value: 1YloYvrGUqWY45khtZUVKbfmAupR1PotJhXUTTTP--JA
+      - key: GOOGLE_SHEET_GID
+        value: "298640172"
+      - key: GOOGLE_OTHER_SHEET_ID
+        value: 1aI1SuXZ2PfiKL4d4neY0xYRuWSHybS0PD1z3rFOnnM8
+      - key: GOOGLE_OTHER_GID
+        value: "0"
+      - key: SYNC_INTERVAL_MINUTES
+        value: "15"
+    # Постоянный диск, чтобы не терять data/bot.sqlite3 и data/wholesalers.json
+    # при пересборке. На плане free диски недоступны — раскомментируйте после
+    # перехода на платный план (Starter и выше).
+    # disk:
+    #   name: bot-data
+    #   mountPath: /app/data
+    #   sizeGB: 1

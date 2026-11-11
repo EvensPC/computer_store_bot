@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from html import escape
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -17,8 +18,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .catalog import all_categories, category_from_code, subcategory_from_code
 from .config import (ADMIN_IDS, BOT_TOKEN, DB_PATH, OTHER_PRICES_PATH,
-                     PRODUCTS_PATH, WHOLESALERS_PATH, WHOLESALERS_CSV_PATH,
-                     SYNC_INTERVAL_MINUTES, is_admin)
+                     PORT, PRODUCTS_PATH, SYNC_INTERVAL_MINUTES,
+                     WEBHOOK_PATH, WEBHOOK_SECRET, WEBHOOK_URL,
+                     WHOLESALERS_CSV_PATH, WHOLESALERS_PATH, is_admin)
 from .database import Database
 from .dns_photos import product_photo
 from .sheet_sync import GoogleSheetSync
@@ -557,6 +559,94 @@ async def periodic_sync():
             log.warning("Плановая синхронизация не удалась (старый каталог сохранён): %s", exc)
 
 
+async def _initial_sync():
+    """Первая загрузка Google Sheets в фоне, чтобы не задерживать старт сервера."""
+    try:
+        count, other, warnings = await asyncio.to_thread(sheet_sync.refresh)
+        log.info("Google Sheets: %d товаров; %d цен сравнения", count, other)
+    except Exception as exc:
+        log.warning("Google Sheets недоступна. Предыдущие цены сохранены: %s", exc)
+
+
+async def _run_polling(bot: Bot, dp: Dispatcher):
+    """Режим long polling: VPS, локальный запуск, Background Worker."""
+    sync_task = asyncio.create_task(_initial_sync())
+    periodic_task = asyncio.create_task(periodic_sync())
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+        await dp.start_polling(bot)
+    finally:
+        sync_task.cancel()
+        periodic_task.cancel()
+        await asyncio.gather(sync_task, periodic_task, return_exceptions=True)
+
+
+async def _run_webhook(bot: Bot, dp: Dispatcher):
+    """Режим webhook: нужен для Render Web Service, который требует открытый PORT."""
+    from aiohttp import web
+
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+    webhook_full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    sync_task = asyncio.create_task(_initial_sync())
+    periodic_task = asyncio.create_task(periodic_sync())
+
+    async def health(request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok", "service": "computer_store_bot"})
+
+    app = web.Application()
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET or None,
+    ).register(app, path=WEBHOOK_PATH)
+    app.router.add_get("/", health)
+    app.router.add_get("/healthz", health)
+
+    async def on_startup(_: web.Application) -> None:
+        await bot.set_webhook(
+            webhook_full_url,
+            secret_token=WEBHOOK_SECRET or None,
+            drop_pending_updates=False,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+        log.info("Webhook установлен: %s", webhook_full_url)
+
+    app.on_startup.append(on_startup)
+    setup_application(app, dp, bot=bot)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    log.info("HTTP-сервер слушает 0.0.0.0:%s", PORT)
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signame in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, signame, None)
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            # Windows и некоторые окружения не поддерживают add_signal_handler.
+            pass
+
+    try:
+        await stop_event.wait()
+    finally:
+        log.info("Останавливаю webhook-сервер")
+        sync_task.cancel()
+        periodic_task.cancel()
+        await asyncio.gather(sync_task, periodic_task, return_exceptions=True)
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+        except Exception as exc:  # сеть может уже отсутствовать при остановке
+            log.warning("Не удалось снять webhook: %s", exc)
+        await runner.cleanup()
+
+
 async def main():
     if not BOT_TOKEN or BOT_TOKEN == "PASTE_TOKEN_FROM_BOTFATHER":
         raise RuntimeError("Не указан рабочий BOT_TOKEN в .env. Смотрите README.md")
@@ -569,21 +659,17 @@ async def main():
             log.info("Восстановлен каталог с диска: %d товаров", count)
         except (ValueError, OSError) as exc:
             log.error("Ошибка локальной копии прайса: %s", exc)
-    try:
-        count, other, warnings = await asyncio.to_thread(sheet_sync.refresh)
-        log.info("Google Sheets: %d товаров; %d цен сравнения", count, other)
-    except Exception as exc:
-        log.warning("Google Sheets недоступна. Предыдущие цены сохранены: %s", exc)
+    # Свежие цены подтягиваются в фоне из _run_webhook/_run_polling,
+    # чтобы Render успел увидеть открытый порт и пройти health check.
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
-    sync_task = asyncio.create_task(periodic_sync())
     try:
-        await bot.delete_webhook(drop_pending_updates=False)
-        await dp.start_polling(bot)
+        if WEBHOOK_URL:
+            await _run_webhook(bot, dp)
+        else:
+            await _run_polling(bot, dp)
     finally:
-        sync_task.cancel()
-        await asyncio.gather(sync_task, return_exceptions=True)
         await bot.session.close()
 
 

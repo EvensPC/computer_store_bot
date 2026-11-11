@@ -175,6 +175,54 @@ GOOGLE_SERVICE_ACCOUNT_FILE=/app/secrets/google-service-account.json
 
 **Не используйте** `docker compose down -v`, если в конфигурации когда-либо появятся именованные тома с рабочими данными. Папку `./data` не удаляйте.
 
+## 7.1. Развёртывание на Render.com
+
+Бот умеет работать в двух режимах:
+
+- **long polling** — по умолчанию, для VPS, локального запуска и Render *Background Worker*;
+- **webhook** — включается автоматически, если задана переменная `WEBHOOK_URL` или `RENDER_EXTERNAL_URL`. Именно этот режим нужен для Render **Web Service**, потому что Web Service обязан слушать порт `$PORT`, иначе деплой падает с ошибкой `no open ports detected`.
+
+### Быстрый путь: Blueprint
+
+1. В Render нажмите **New → Blueprint** и выберите репозиторий `computer_store_bot`.
+2. Render прочитает `render.yaml`, создаст сервис `computer-store-bot` и попросит заполнить секреты.
+3. Введите `BOT_TOKEN` и `ADMIN_IDS` (ваш ID, например `855724126`). Остальное уже прописано в `render.yaml`.
+4. Нажмите **Apply** и дождитесь статуса **Live**.
+
+`RENDER_EXTERNAL_URL` и `PORT` Render подставляет сам — задавать их вручную не нужно. Бот сам выполнит `setWebhook` на `https://<ваш-сервис>.onrender.com/telegram/webhook`. Проверить, что сервис жив: `https://<ваш-сервис>.onrender.com/healthz` должен вернуть `{"status":"ok"}`.
+
+### Вручную (без Blueprint)
+
+**New → Web Service → Build and deploy from a Git repository**, окружение **Docker**, `Dockerfile` в корне. В **Environment** добавьте:
+
+```env
+BOT_TOKEN=токен_из_BotFather
+ADMIN_IDS=855724126
+GOOGLE_SHEET_ID=1YloYvrGUqWY45khtZUVKbfmAupR1PotJhXUTTTP--JA
+GOOGLE_SHEET_GID=298640172
+GOOGLE_OTHER_SHEET_ID=1aI1SuXZ2PfiKL4d4neY0xYRuWSHybS0PD1z3rFOnnM8
+GOOGLE_OTHER_GID=0
+SYNC_INTERVAL_MINUTES=15
+```
+
+### ⚠️ Ограничения бесплатного плана Render
+
+1. **Сервис засыпает** после ~15 минут без HTTP-запросов. Первое сообщение после сна обрабатывается с задержкой 30–60 секунд (холодный старт), иногда Telegram успевает получить таймаут и повторит доставку.
+2. **Нет постоянного диска.** Папка `data/` (то есть `bot.sqlite3`, `wholesalers.json`, кэш прайсов) **теряется при каждом передеплое и рестарте**. Все одобренные оптовики и история заявок обнулятся. Для боевого использования нужен платный план + диск: раскомментируйте блок `disk` в `render.yaml` (либо **Disk → Mount Path `/app/data`, 1 GB** в настройках сервиса).
+3. **750 часов инстанса в месяц** бесплатно; при одном постоянно работающем сервисе это почти весь месяц.
+
+Если нужен стабильный polling без засыпания и с диском — дешевле взять **Background Worker** (`type: worker` в `render.yaml`, стартовая команда `python run.py`, никакого порта не требуется) или обычный VPS по разделу 7.
+
+### Частые ошибки на Render
+
+| Симптом | Причина и решение |
+|---|---|
+| `no open ports detected` | Запущен Background Worker с типом Web Service. Нужен webhook-режим (он включён по умолчанию на Render) либо смените тип сервиса на Worker. |
+| `RuntimeError: Не задан ADMIN_IDS` | Переменная не добавлена в **Environment**. |
+| Бот молчит, в логах `Webhook установлен` | Проверьте `https://<сервис>.onrender.com/healthz` и что сервис не в состоянии *Suspended*. |
+| `Conflict: terminated by other getUpdates request` | Где-то ещё запущен polling с тем же токеном. Остановите локальный `python run.py` — на Render работает webhook. |
+| После передеплоя пропали оптовики | Нет постоянного диска (см. пункт 2 выше). |
+
 ## 8. Проверка без Telegram и без Google
 
 В проекте есть 10 автономных тестов импорта, разбора прайсов без шапки, сопоставления 379 ↔ 482, заявок на опт и сохранения доступа между перезапусками:

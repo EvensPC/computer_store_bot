@@ -32,6 +32,22 @@ service_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
 GOOGLE_SERVICE_ACCOUNT_FILE = Path(service_file).expanduser().resolve() if service_file else None
 SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("SYNC_INTERVAL_MINUTES", "15")))
 
+# --- Режим работы: long polling (VPS, локально) или webhook (Render, PaaS) ---
+# Render сам подставляет RENDER_EXTERNAL_URL, поэтому на нём webhook включается автоматически.
+WEBHOOK_URL = (os.getenv("WEBHOOK_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
+if not WEBHOOK_PATH.startswith("/"):
+    WEBHOOK_PATH = "/" + WEBHOOK_PATH
+_webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip()
+if not _webhook_secret and BOT_TOKEN:
+    # Секрет нужен для проверки, что запрос пришёл именно от Telegram.
+    import hashlib
+
+    _webhook_secret = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:40]
+WEBHOOK_SECRET = _webhook_secret
+PORT = int(os.getenv("PORT", "8080"))
+USE_WEBHOOK = bool(WEBHOOK_URL)
+
 # Для распознавания строк-разделителей в прайсе.
 MENU_CATEGORIES = (
     "Блоки питания", "Видеокарты", "Жесткие диски и SSD", "Материнские платы",

@@ -1,0 +1,21 @@
+{
+  "header_row": 1,
+  "columns": {
+    "sku": "Артикул",
+    "name": "Наименование",
+    "category": "Группа",
+    "subcategory": "Подгруппа",
+    "retail_price": "Розница",
+    "wholesale_price": "Опт",
+    "dns_url": "Ссылка DNS",
+    "photo_url": "Фото"
+  },
+  "other_header_row": 1,
+  "other_columns": {
+    "sku": "Артикул",
+    "supplier": "Поставщик",
+    "price": "Цена",
+    "price_type": "Тип цены",
+    "url": "Ссылка"
+  }
+}

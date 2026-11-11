@@ -1,0 +1,45 @@
+"""Настройки, ID Google Sheets и пути к постоянным данным."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_IDS: set[int] = {
+    int(item.strip()) for item in os.getenv("ADMIN_IDS", "").split(",")
+    if item.strip().isdigit()
+}
+DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "bot.sqlite3"
+WHOLESALERS_PATH = DATA_DIR / "wholesalers.json"
+WHOLESALERS_CSV_PATH = DATA_DIR / "wholesalers.csv"
+PRODUCTS_PATH = DATA_DIR / "products.csv"
+OTHER_PRICES_PATH = DATA_DIR / "other_prices.csv"
+COLUMN_MAP_PATH = DATA_DIR / "column_map.json"
+
+# Точная ссылка, указанная владельцем прайса.
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1YloYvrGUqWY45khtZUVKbfmAupR1PotJhXUTTTP--JA").strip()
+GOOGLE_SHEET_GID = os.getenv("GOOGLE_SHEET_GID", "298640172").strip()
+GOOGLE_OTHER_SHEET_ID = (os.getenv("GOOGLE_OTHER_SHEET_ID", "").strip() or "1aI1SuXZ2PfiKL4d4neY0xYRuWSHybS0PD1z3rFOnnM8")
+GOOGLE_OTHER_GID = (os.getenv("GOOGLE_OTHER_GID", "").strip() or "0")
+service_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+GOOGLE_SERVICE_ACCOUNT_FILE = Path(service_file).expanduser().resolve() if service_file else None
+SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("SYNC_INTERVAL_MINUTES", "15")))
+
+# Для распознавания строк-разделителей в прайсе.
+MENU_CATEGORIES = (
+    "Блоки питания", "Видеокарты", "Жесткие диски и SSD", "Материнские платы",
+    "Оперативная память", "Процессоры", "Системы охлаждения", "Корпуса",
+    "Комплектующие Б/у", "Мониторы", "Периферия", "Накопители данных",
+    "Компьютеры и ноутбуки", "Разное",
+)
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS

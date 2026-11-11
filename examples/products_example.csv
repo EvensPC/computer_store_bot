@@ -1,0 +1,3 @@
+sku,name,category,subcategory,retail_price,wholesale_price,dns_url,photo_url
+EXAMPLE-GPU-01,Вымышленная видеокарта 8 ГБ,Видеокарты,NVIDIA,25000,23000,,
+EXAMPLE-SSD-02,Вымышленный SSD 512 ГБ,Жесткие диски и SSD,SSD,4000,3700,,

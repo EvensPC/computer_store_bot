@@ -1,6 +1,11 @@
 # Конфигурация развёртывания на Render (https://render.com).
 # Схема: New → Blueprint → подключить этот репозиторий.
 #
+# ⚠️ ОБЯЗАТЕЛЬНО заполните в Render → ваш сервис → Environment:
+#     BOT_TOKEN  — токен от @BotFather
+#     ADMIN_IDS  — ваш числовой Telegram ID
+# Без них контейнер завершится с ошибкой "Exited with status 1".
+#
 # Бот работает как обычный Web Service через webhook: Render сам передаёт
 # RENDER_EXTERNAL_URL и PORT, поэтому отдельная настройка не нужна.
 services:

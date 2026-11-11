@@ -269,6 +269,7 @@ SYNC_INTERVAL_MINUTES=15
 | Симптом | Причина и решение |
 |---|---|
 | `no open ports detected` | Запущен Background Worker с типом Web Service. Нужен webhook-режим (он включён по умолчанию на Render) либо смените тип сервиса на Worker. |
+| `Exited with status 1` + `Не задан BOT_TOKEN` | В Render не заполнена переменная `BOT_TOKEN`. Dashboard → сервис → **Environment** → добавьте `BOT_TOKEN` и нажмите Save. |
 | `RuntimeError: Не задан ADMIN_IDS` | Переменная не добавлена в **Environment**. |
 | Бот молчит, в логах `Webhook установлен` | Проверьте `https://<сервис>.onrender.com/healthz` и что сервис не в состоянии *Suspended*. |
 | `Conflict: terminated by other getUpdates request` | Где-то ещё запущен polling с тем же токеном. Остановите локальный `python run.py` — на Render работает webhook. |

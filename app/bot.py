@@ -733,9 +733,21 @@ async def _run_webhook(bot: Bot, dp: Dispatcher):
 
 async def main():
     if not BOT_TOKEN or BOT_TOKEN == "PASTE_TOKEN_FROM_BOTFATHER":
-        raise RuntimeError("Не указан рабочий BOT_TOKEN в .env. Смотрите README.md")
+        raise RuntimeError(
+            "Не задан BOT_TOKEN.\n"
+            "  Render: Dashboard -> ваш сервис -> Environment -> Add Environment Variable\n"
+            "          BOT_TOKEN = токен от @BotFather, затем Save (сервис перезапустится).\n"
+            "  Локально: скопируйте .env.example в .env и укажите BOT_TOKEN там.\n"
+            "  Подробнее: README.md, раздел 1."
+        )
     if not ADMIN_IDS:
-        raise RuntimeError("Не задан ADMIN_IDS в .env. Смотрите README.md")
+        raise RuntimeError(
+            "Не задан ADMIN_IDS.\n"
+            "  Render: Environment -> Add Environment Variable\n"
+            "          ADMIN_IDS = ваш числовой Telegram ID (например 855724126).\n"
+            "  Локально: укажите ADMIN_IDS в .env.\n"
+            "  Подробнее: README.md, раздел 1."
+        )
     # Если интернет временно отсутствует, используем последний сохранённый каталог.
     if PRODUCTS_PATH.exists() and OTHER_PRICES_PATH.exists():
         try:

@@ -88,6 +88,89 @@ class PricesTest(unittest.TestCase):
         rows = parse_competitors(data, {"header_row": 1})
         self.assertEqual(rows[0]["price_type"], "wholesale")
 
+    def test_real_379_layout_with_sections_in_sku_column(self):
+        # Реальная структура прайса 379: артикул в B, название в C,
+        # единственная цена в D, а разделы идут в колонке B без названия.
+        rows = [
+            ["", "Код Блоки питания 1000-2200W", "Обновлен 11.11.26 EvensPC", "Опт цена ", ""],
+            ["", "00-00007577", "Блок питания 1000W 1stPlayer NGDP", "10500", ""],
+            ["", "00-00007852", "Блок питания 1000W ASUS TUF", "17500", ""],
+            ["", "800-850W", "", "", ""],
+            ["", "00-00009000", "Блок питания 850W Chieftec", "7000", ""],
+            ["", "Видеокарты", "", "", ""],
+            ["", "Видеокарты NVIDIA", "", "", ""],
+            ["", "00-00001234", "Видеокарта RTX 4060", "34500", ""],
+            ["", "00-00001235", "Видеокарта RTX 4070", "54500", ""],
+        ]
+        products, other, warnings = parse_products(rows, {"header_row": 1, "columns": {}})
+        self.assertEqual(len(products), 5)
+        self.assertEqual(other, [])
+        self.assertEqual(products[0]["sku"], "00-00007577")
+        self.assertEqual(products[0]["category"], "Блоки питания")
+        self.assertEqual(products[0]["subcategory"], "1000-2200W")
+        self.assertEqual(products[0]["retail_price"], "10500")
+        self.assertEqual(products[0]["wholesale_price"], "10500")
+        self.assertEqual(products[2]["subcategory"], "800-850W")
+        self.assertEqual(products[3]["category"], "Видеокарты")
+        self.assertEqual(products[3]["subcategory"], "Видеокарты NVIDIA")
+        self.assertTrue(all("Опт цена" not in (p["name"] or "") for p in products))
+        self.assertEqual(warnings, [])
+
+
+    def test_model_matching_rejects_different_versions(self):
+        products = [
+            {"sku": "A1", "name": "Видеокарта GeForce RTX 3050 6GB MSI VENTUS 2X E OC"},
+            {"sku": "A2", "name": "Материнская плата LGA 1700 ASUS PRIME B760M-A WIFI D4 (ATX, 4xDDR4)"},
+            {"sku": "A3", "name": "Блок питания 850W 1stPlayer NGDP Gold (HA-850BA4-WH)"},
+        ]
+        competitors = [
+            {"sku": "9001", "name": "Видеокарта GeForce RTX 5060Ti 16Gb MSI Ventus 2X OC Plus",
+             "supplier": "Прайс 482", "price_type": "retail", "price": "84000", "url": ""},
+            {"sku": "9002", "name": "Материнская плата 1700 Asus B760M-F Prime",
+             "supplier": "Прайс 482", "price_type": "retail", "price": "9500", "url": ""},
+            {"sku": "9003", "name": "Блок питания 850W 1stPlayer NGDP HA-850BA4-BK",
+             "supplier": "Прайс 482", "price_type": "retail", "price": "7250", "url": ""},
+        ]
+        linked, by_sku, by_name = link_competitors(products, competitors)
+        self.assertEqual(linked, [])
+        self.assertEqual((by_sku, by_name), (0, 0))
+
+    def test_model_matching_links_same_product_written_differently(self):
+        products = [
+            {"sku": "B1", "name": "Блок питания 850W 1stPlayer NGDP Gold, 80 PLUS Gold, "
+                                  "белый (HA-850BA4-WH)"},
+            {"sku": "B2", "name": "Видеокарта GeForce RTX 5070 12GB MSI SHADOW 2X OC (G5070-12S2C)"},
+        ]
+        competitors = [
+            {"sku": "777", "name": "Блок питания 850W 1stPlayer NGDP HA-850BA4-WH",
+             "supplier": "Прайс 482", "price_type": "retail", "price": "8520", "url": ""},
+            {"sku": "778", "name": "Видеокарта GeForce RTX 5070 12Gb MSI Shadow 2X",
+             "supplier": "Прайс 482", "price_type": "retail", "price": "94900", "url": ""},
+        ]
+        linked, by_sku, by_name = link_competitors(products, competitors)
+        self.assertEqual((by_sku, by_name), (0, 2))
+        self.assertEqual({row["sku"] for row in linked}, {"B1", "B2"})
+        self.assertTrue(all("по модели" in row["supplier"] for row in linked))
+
+
+class MenuKeyboardTest(unittest.TestCase):
+    def test_main_menu_is_inline_with_named_actions(self):
+        from aiogram.types import InlineKeyboardMarkup
+
+        from app.keyboards import main_keyboard
+
+        class FakeDb:
+            def db_categories(self):
+                return []
+
+        keyboard = main_keyboard(FakeDb(), 0)
+        self.assertIsInstance(keyboard, InlineKeyboardMarkup)
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        self.assertIn("menu:search", callbacks)
+        self.assertIn("menu:profile", callbacks)
+        self.assertIn("menu:apply", callbacks)
+        self.assertTrue(any(data and data.startswith("cat:") for data in callbacks))
+
 
 class DatabaseTest(unittest.TestCase):
     def setUp(self):

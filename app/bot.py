@@ -9,11 +9,11 @@ from html import escape
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .catalog import all_categories, category_from_code, subcategory_from_code
@@ -25,7 +25,7 @@ from .database import Database
 from .dns_photos import product_photo
 from .sheet_sync import GoogleSheetSync
 from .wholesale_sheet import WholesaleSheet
-from .keyboards import (admin_home_keyboard, categories_keyboard,
+from .keyboards import (admin_home_keyboard, back_keyboard, categories_keyboard,
                         comparison_keyboard, main_keyboard, money, product_keyboard,
                         products_keyboard, profile_keyboard, review_keyboard,
                         search_keyboard)
@@ -58,16 +58,44 @@ def safe_page(raw: str) -> int:
     return page
 
 
+async def render(message: Message, text: str, keyboard=None, *, edit: bool = True) -> None:
+    """Показывает экран каталога.
+
+    По умолчанию сообщение бота редактируется на месте: меню и списки
+    «перелистываются» без новых сообщений. Если редактировать нельзя
+    (фото-карточка, слишком старое сообщение), отправляется новое.
+    """
+    if edit and message is not None and not (
+        message.photo or message.video or message.document or message.animation
+    ):
+        try:
+            await message.edit_text(text, reply_markup=keyboard)
+            return
+        except TelegramBadRequest as exc:
+            text_error = str(exc).lower()
+            if "message is not modified" in text_error:
+                return
+            if "message can't be edited" not in text_error and "message to edit not found" not in text_error:
+                log.info("Не удалось изменить сообщение, отправляю новое: %s", exc)
+    await message.answer(text, reply_markup=keyboard)
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     if not message.from_user:
         return
     save_telegram_user(message.from_user)
     await state.clear()
+    # Убираем старую ReplyKeyboard (если осталась от прошлых версий бота):
+    # дальше всё меню приходит inline-кнопками в сообщении.
     await message.answer(
         "🖥 <b>Каталог компьютерных комплектующих</b>\n\n"
-        "Выберите группу товаров в меню ниже. Внутри будут подгруппы и карточки "
-        "с артикулами, ценами и сравнением с другим прайсом.",
+        "Группы и подгруппы приходят сообщением: нажимайте кнопки, и текст "
+        "меняется на месте, без новых сообщений.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer(
+        "🏠 <b>Главное меню</b> — выберите группу товаров:",
         reply_markup=main_keyboard(db, message.from_user.id),
     )
 
@@ -94,9 +122,9 @@ async def cancel_search(message: Message, state: FSMContext):
     await message.answer("Поиск отменён.")
 
 
-async def show_admin_home(message: Message, user_id: int):
+async def show_admin_home(message: Message, user_id: int, edit: bool = False):
     if not is_admin(user_id):
-        await message.answer("⛔ Доступ только для администратора.")
+        await render(message, "⛔ Доступ только для администратора.", edit=edit)
         return
     pending, count = db.requests(pending_only=True)
     if wholesale_sheet.enabled:
@@ -106,13 +134,15 @@ async def show_admin_home(message: Message, user_id: int):
         wholesale_line = f"\n☁️ Оптовики в Google-таблице: {escape(sheet_state)}"
     else:
         wholesale_line = "\n☁️ Google-таблица для оптовиков не настроена (WHOLESALE_SHEET_ID)"
-    await message.answer(
+    await render(
+        message,
         f"🛠 <b>Админ-панель</b>\nОжидают решения: <b>{count}</b>\n"
         f"Оптовиков в реестре: <b>{len(db.wholesalers())}</b>\n"
         f"Google Sheets: {escape(sheet_sync.last_success or 'ещё не синхронизирована')}"
         + wholesale_line
         + (f"\nПоследняя ошибка: {escape(sheet_sync.last_error[:250])}" if sheet_sync.last_error else ""),
-        reply_markup=admin_home_keyboard(),
+        admin_home_keyboard(),
+        edit=edit,
     )
 
 
@@ -122,7 +152,7 @@ async def admin_command(message: Message):
         await show_admin_home(message, message.from_user.id)
 
 
-async def show_profile(message: Message, user_id: int):
+async def show_profile(message: Message, user_id: int, edit: bool = False):
     user = db.user(user_id)
     role = price_type(user_id)
     req = db.latest_request(user_id)
@@ -138,11 +168,13 @@ async def show_profile(message: Message, user_id: int):
         status = "Розничный покупатель (прошлая заявка отклонена)"
     else:
         status = "Розничный покупатель"
-    await message.answer(
+    await render(
+        message,
         f"👤 <b>Мой профиль</b>\n"
         f"Имя: {escape((user or {}).get('full_name') or '—')}\n"
         f"Telegram ID: <code>{user_id}</code>\nСтатус: {status}",
-        reply_markup=profile_keyboard(approved, pending),
+        profile_keyboard(approved, pending),
+        edit=edit,
     )
 
 
@@ -175,18 +207,20 @@ async def apply_for_wholesale(message: Message, user):
             log.warning("Не удалось уведомить администратора %s: %s", admin_id, exc)
 
 
-async def show_search_results(message: Message, user_id: int, page: int):
+async def show_search_results(message: Message, user_id: int, page: int, edit: bool = False):
     term = last_search.get(user_id)
     if not term:
-        await message.answer("Поисковый запрос не найден. Нажмите «🔎 Поиск товара» снова.")
+        await render(message, "Поисковый запрос не найден. Нажмите «🔎 Поиск товара» снова.", edit=edit)
         return
     results, count = db.search(term, page)
     if not results:
-        await message.answer("По вашему запросу товары не найдены. Попробуйте другое название или артикул.")
+        await render(message, "По вашему запросу товары не найдены. Попробуйте другое название или артикул.", edit=edit)
         return
-    await message.answer(
+    await render(
+        message,
         f"🔎 <b>Поиск: {escape(term)}</b>\nНайдено товаров: {count} · Страница {page+1}",
-        reply_markup=search_keyboard(results, page, count),
+        search_keyboard(results, page, count),
+        edit=edit,
     )
 
 
@@ -231,10 +265,40 @@ async def callback_home(query: CallbackQuery, state: FSMContext):
     await query.answer()
     await state.clear()
     if query.message:
-        await query.message.answer(
+        await render(
+            query.message,
             "🏠 <b>Главное меню</b> — выберите группу товаров:",
-            reply_markup=main_keyboard(db, query.from_user.id),
+            main_keyboard(db, query.from_user.id),
         )
+
+
+@router.callback_query(F.data == "menu:search")
+async def callback_menu_search(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    await state.set_state(SearchState.waiting)
+    if query.message:
+        await render(
+            query.message,
+            "🔎 <b>Поиск товара</b>\n"
+            "Введите название или артикул (например: DEMO-001).\n/cancel — отменить.",
+            back_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "menu:profile")
+async def callback_menu_profile(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    await state.clear()
+    if query.message:
+        await show_profile(query.message, query.from_user.id, edit=True)
+
+
+@router.callback_query(F.data == "menu:apply")
+async def callback_menu_apply(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    await state.clear()
+    if query.message:
+        await apply_for_wholesale(query.message, query.from_user)
 
 
 @router.callback_query(F.data == "apply")
@@ -252,8 +316,8 @@ async def callback_category(query: CallbackQuery):
         return
     await query.answer()
     if query.message:
-        await query.message.answer(f"📂 <b>{escape(cat)}</b>\nВыберите подгруппу:",
-                                   reply_markup=categories_keyboard(db, cat))
+        await render(query.message, f"📂 <b>{escape(cat)}</b>\nВыберите подгруппу:",
+                     categories_keyboard(db, cat))
 
 
 @router.callback_query(F.data.startswith("sub:"))
@@ -272,11 +336,37 @@ async def callback_subcategory(query: CallbackQuery):
     await query.answer()
     if query.message:
         count = db.count_products(cat, sub)
-        await query.message.answer(
+        await render(
+            query.message,
             f"📦 <b>{escape(cat)} / {escape(sub)}</b>\n"
             f"Товаров: {count}. Выберите товар:",
-            reply_markup=products_keyboard(db, cat, sub, page),
+            products_keyboard(db, cat, sub, page),
         )
+
+
+def comparison_summary(product: dict, level: str, limit: int = 3) -> str:
+    """Короткая сводка цен из прайса 482 для карточки товара."""
+    our_price = product["wholesale_price"] if level == "wholesale" else product["retail_price"]
+    rows = db.comparisons(product["sku"], level)
+    if not rows:
+        return ""
+    lines = ["📊 <b>Прайс 482:</b>"]
+    for item in rows[:limit]:
+        if our_price is None:
+            lines.append(f"• {money(item['price'])} (наша цена не заполнена)")
+            continue
+        delta = our_price - item["price"]
+        percent = abs(delta) / item["price"] * 100
+        if delta > 0:
+            difference = f"выше на {money(delta)} ({percent:.1f}%)"
+        elif delta < 0:
+            difference = f"ниже на {money(-delta)} ({percent:.1f}%)"
+        else:
+            difference = "цены совпадают"
+        lines.append(f"• {money(item['price'])} — наша {difference}")
+    if len(rows) > limit:
+        lines.append(f"…и ещё {len(rows) - limit}. Подробнее — «💰 Сравнить цены».")
+    return "\n".join(lines)
 
 
 async def send_product(message: Message, product: dict, user_id: int, page: int, source: str):
@@ -294,6 +384,9 @@ async def send_product(message: Message, product: dict, user_id: int, page: int,
         caption += f"💼 <b>Оптовая цена: {wholesale}</b>\nРозничная цена: {retail}"
     else:
         caption += f"💳 <b>Розничная цена: {retail}</b>\n🔒 Оптовая цена — после одобрения заявки"
+    summary = comparison_summary(product, "wholesale" if is_opt else "retail")
+    if summary:
+        caption += "\n\n" + summary
     keyboard = product_keyboard(product, page, source)
     photo = await product_photo(product)
     if photo:
@@ -387,7 +480,7 @@ async def callback_search(query: CallbackQuery):
         return
     await query.answer()
     if query.message:
-        await show_search_results(query.message, query.from_user.id, page)
+        await show_search_results(query.message, query.from_user.id, page, edit=True)
 
 
 async def show_requests(message: Message, pending_only: bool, page: int):
@@ -451,7 +544,7 @@ async def callback_admin(query: CallbackQuery):
     action = pieces[1] if len(pieces) > 1 else ""
     await query.answer()
     if action == "home":
-        await show_admin_home(query.message, query.from_user.id)
+        await show_admin_home(query.message, query.from_user.id, edit=True)
         return
     if action in ("q", "h", "w"):
         try:

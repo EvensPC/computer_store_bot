@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .catalog import all_categories, all_subcategories, code
@@ -17,14 +17,28 @@ def money(value: int | None) -> str:
     return f"{whole:,}".replace(",", " ") + (f",{frac:02d}" if frac else "") + " ₽"
 
 
-def main_keyboard(db, user_id: int) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=cat)] for cat in all_categories(db)]
-    rows.append([KeyboardButton(text="🔎 Поиск товара"), KeyboardButton(text="👤 Мой профиль")])
-    rows.append([KeyboardButton(text="🤝 Стать оптовиком")])
+def main_keyboard(db, user_id: int) -> InlineKeyboardMarkup:
+    """Главное меню в виде inline-кнопок: сообщение меняется на месте."""
+    categories = all_categories(db)
+    rows = [
+        [InlineKeyboardButton(text=cat, callback_data=f"cat:{code(cat)}")
+         for cat in categories[i:i + 2]]
+        for i in range(0, len(categories), 2)
+    ]
+    rows.append([
+        InlineKeyboardButton(text="🔎 Поиск товара", callback_data="menu:search"),
+        InlineKeyboardButton(text="👤 Мой профиль", callback_data="menu:profile"),
+    ])
+    rows.append([InlineKeyboardButton(text="🤝 Стать оптовиком", callback_data="menu:apply")])
     if is_admin(user_id):
-        rows.append([KeyboardButton(text="🛠 Админ-панель")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True,
-                               is_persistent=True, input_field_placeholder="Выберите раздел")
+        rows.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="adm:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+    ])
 
 
 def categories_keyboard(db, category: str) -> InlineKeyboardMarkup:

@@ -1,25 +1,17 @@
-"""Порядок разделов главного меню и подкатегорий."""
+"""Категории и подкатегории каталога.
+
+Категории берутся из прайса (config.MENU_CATEGORIES) в заданном порядке,
+подкатегории — из фактических данных Google-таблицы. Так меню всегда
+совпадает с тем, что реально загружено, без «пустых» пунктов.
+"""
 from __future__ import annotations
 
 from hashlib import sha1
 
-# Порядок скопирован с предоставленного примера. Можно менять под собственный каталог.
-CATEGORY_STRUCTURE: dict[str, list[str]] = {
-    "Блоки питания": ["ATX", "SFX"],
-    "Видеокарты": ["NVIDIA", "AMD"],
-    "Жесткие диски и SSD": ["SSD", "HDD"],
-    "Материнские платы": ["Intel", "AMD"],
-    "Оперативная память": ["DDR4", "DDR5"],
-    "Процессоры": ["Intel", "AMD"],
-    "Системы охлаждения": ["Воздушное", "Жидкостное"],
-    "Корпуса": ["Midi-Tower", "Mini-Tower"],
-    "Комплектующие Б/у": ["Видеокарты Б/у", "Процессоры Б/у"],
-    "Мониторы": ["24 дюйма", "27 дюймов"],
-    "Периферия": ["Клавиатуры", "Мыши"],
-    "Накопители данных": ["Флешки", "Внешние SSD"],
-    "Компьютеры и ноутбуки": ["Системные блоки", "Ноутбуки"],
-    "Разное": ["Кабели", "Адаптеры и хабы"],
-}
+from .config import MENU_CATEGORIES
+
+# Порядок групп в меню. Подкатегории не фиксируются: они приходят из прайса.
+CATEGORY_STRUCTURE: dict[str, list[str]] = {name: [] for name in MENU_CATEGORIES}
 
 
 def code(value: str) -> str:
@@ -36,9 +28,7 @@ def category_from_code(db, cat_code: str) -> str | None:
 
 
 def all_subcategories(db, category: str) -> list[str]:
-    default = CATEGORY_STRUCTURE.get(category, [])
-    extra = [x for x in db.db_subcategories(category) if x not in default]
-    return [*default, *extra]
+    return db.db_subcategories(category)
 
 
 def subcategory_from_code(db, category: str, sub_code: str) -> str | None:

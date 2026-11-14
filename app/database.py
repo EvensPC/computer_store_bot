@@ -53,22 +53,30 @@ def csv_rows(path: Path, required: set[str]) -> list[dict[str, str]]:
         raise FileNotFoundError(f"Не найден прайс: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         sample = f.read(4096)
-        f.seek(0)
+        # Сначала пробуем стандартный CSV (его пишет сам бот). Только если
+        # шапка не подошла, угадываем разделитель — Sniffer иногда ошибается
+        # на длинных названиях с запятыми и кавычками.
+        dialects = [csv.excel]
         try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+            sniffed = csv.Sniffer().sniff(sample, delimiters=",;")
+            if sniffed.delimiter != csv.excel.delimiter:
+                dialects.append(sniffed)
         except csv.Error:
-            dialect = csv.excel
-        reader = csv.DictReader(f, dialect=dialect)
-        if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
-            raise ValueError(f"{path.name}: обязательные колонки: {', '.join(sorted(required))}")
-        result = []
-        for line_no, row in enumerate(reader, start=2):
-            if None in row:
-                raise ValueError(f"{path.name}, строка {line_no}: лишние разделители")
-            if not any((v or "").strip() for v in row.values()):
+            pass
+        for dialect in dialects:
+            f.seek(0)
+            reader = csv.DictReader(f, dialect=dialect)
+            if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
                 continue
-            result.append({k: (v or "").strip() for k, v in row.items()})
-        return result
+            result = []
+            for line_no, row in enumerate(reader, start=2):
+                if None in row:
+                    raise ValueError(f"{path.name}, строка {line_no}: лишние разделители")
+                if not any((v or "").strip() for v in row.values()):
+                    continue
+                result.append({k: (v or "").strip() for k, v in row.items()})
+            return result
+    raise ValueError(f"{path.name}: обязательные колонки: {', '.join(sorted(required))}")
 
 
 class Database:

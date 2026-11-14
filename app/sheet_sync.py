@@ -187,11 +187,135 @@ def infer_legacy_columns(rows: list[list[str]]) -> dict[str, int] | None:
     return {"sku": 0, "name": 1, "price": index}
 
 
+SKU_LIKE = re.compile(r"^\d[\d\-/.]{2,}$")
+
+
+def _is_price_cell(text: str) -> bool:
+    try:
+        price_number(text)
+        return True
+    except ValueError:
+        return False
+
+
+def detect_columns(rows: list[list[str]], sample: int = 400) -> dict | None:
+    """Определяет колонки по содержимому, когда шапка нестандартная.
+
+    Нужно для прайса 379: артикул в B, название в C, цена в D, а шапка —
+    текст вида «Код Блоки питания ...» / «Опт цена». Если шапка распознаётся
+    обычным способом, эта функция не используется.
+    """
+    window = [row for row in rows[:sample] if row]
+    if len(window) < 3:
+        return None
+    width = max((len(row) for row in window), default=0)
+    if width < 3:
+        return None
+    stats = [{"sku": 0, "name": 0, "price": 0, "filled": 0} for _ in range(width)]
+    for row in window:
+        for i in range(min(width, len(row))):
+            value = row[i].strip()
+            if not value:
+                continue
+            stats[i]["filled"] += 1
+            is_price = _is_price_cell(value)
+            is_sku = bool(SKU_LIKE.match(value)) and len(value) <= 64
+            if is_price:
+                # Число может быть и артикулом (482), и ценой (379). Считаем
+                # оба варианта, а колонку выбираем по разнице — см. ниже.
+                stats[i]["price"] += 1
+            if is_sku and not is_price:
+                stats[i]["sku"] += 1
+            elif not is_sku and len(value) >= 8 and sum(ch.isalpha() for ch in value) >= 3:
+                stats[i]["name"] += 1
+    minimum = max(3, int(len(window) * 0.2))
+
+    # Колонка артикулов: где максимум «похожих на артикул», но минимум цен.
+    # Иначе чисто цифровая колонка цен победила бы колонку артикулов.
+    sku = max(range(width), key=lambda i: (stats[i]["sku"] - stats[i]["price"], -i))
+    if stats[sku]["sku"] < minimum:
+        return None
+
+    name_candidates = [i for i in range(width) if i != sku]
+    name = max(name_candidates, key=lambda i: stats[i]["name"], default=None)
+    if name is None or stats[name]["name"] < minimum:
+        return None
+
+    prices = [i for i in range(width)
+              if i not in (sku, name) and stats[i]["price"] >= minimum]
+    if not prices:
+        return None
+    prices.sort()
+    return {"sku": sku, "name": name, "prices": prices[:2]}
+
+
+def apply_section(text: str, state: dict) -> None:
+    """Разбирает строку-разделитель прайса: категория это или подкатегория."""
+    raw = str(text or "").strip()
+    if not raw:
+        return
+    low = normalize(raw)
+    if low.startswith("код "):
+        # Начало прайса: «Код Блоки питания 1000-2200W» или
+        # «Код Комплектующие для ПК Блоки питания 1000-2200W».
+        # Ищем категорию в любом месте заголовка, остаток — подкатегория.
+        rest = raw[4:].strip()
+        rest_fold = rest.casefold().replace("ё", "е")
+        best = None
+        for category in config.MENU_CATEGORIES:
+            needle = category.casefold().replace("ё", "е")
+            pos = rest_fold.find(needle)
+            while pos >= 0:
+                end = pos + len(needle)
+                left_ok = pos == 0 or not rest_fold[pos - 1].isalnum()
+                right_ok = end == len(rest_fold) or not rest_fold[end].isalnum()
+                if left_ok and right_ok:
+                    break
+                pos = rest_fold.find(needle, pos + 1)
+            if pos >= 0 and (best is None or pos < best[0]):
+                best = (pos, category, end)
+        if best:
+            _, category, end = best
+            state["category"] = category
+            state["subcategory"] = rest[end:].strip(" -–—:,")
+            return
+    for category in config.MENU_CATEGORIES:
+        if low == normalize(category):
+            state["category"] = category
+            state["subcategory"] = ""
+            return
+    # Всё остальное — подкатегория текущей группы.
+    if state.get("category"):
+        state["subcategory"] = raw
+
+
+_UNIT_RE = re.compile(r"\b(\d+)\s*(gb|tb|mb|w|vt|mhz|ghz|mm)\b")
+_GPU_ONE_RE = re.compile(r"\b(rtx|gtx|rx)\s*(\d{3,4})\s*(ti|super|xt|gre)\b")
+_GPU_TWO_RE = re.compile(r"\b(rtx|gtx|rx)\s+(\d{3,4})\b")
+
+
+def model_tokens(name: str) -> set[str]:
+    """Слова названия для строгого сопоставления двух прайсов.
+
+    Приводит «RTX 5060 Ti» → «rtx5060ti», «16 GB» → «16gb», чтобы одинаковые
+    модели из разных таблиц сравнивались как равные. Односимвольные части
+    моделей (B760M-A / B760M-F) сохраняются: они различают варианты.
+    """
+    text = str(name or "").casefold().replace("ё", "е")
+    text = re.sub(r"[^\w]+", " ", text)
+    text = _UNIT_RE.sub(r"\1\2", text)
+    text = _GPU_ONE_RE.sub(r"\1\2\3", text)
+    text = _GPU_TWO_RE.sub(r"\1\2", text)
+    return {token for token in text.split() if token}
+
+
 def link_competitors(products: list[dict], competitors: list[dict]) -> tuple[list[dict], int, int]:
-    """Сопоставление 379 ↔ 482: сначала уникальный SKU, затем точное название.
+    """Сопоставление 379 ↔ 482: уникальный SKU, точное название, затем модель.
 
     Разные поставщики могут использовать несвязанные внутренние артикулы.
-    Не допускаем совпадений по неполному названию / неуверенным моделям.
+    Названия сравниваются по вложенности слов: все значимые слова строки 482
+    должны присутствовать в названии товара 379 (с учётом «RTX 5060 Ti»).
+    Так RTX 3050 не совпадёт с RTX 5060Ti, а B760M-A — с B760M-F.
     """
     def sku_key(value: str) -> str:
         return re.sub(r"\s+", "", str(value)).casefold()
@@ -240,6 +364,48 @@ def link_competitors(products: list[dict], competitors: list[dict]) -> tuple[lis
         result.append(converted)
         matched_sku += method == "sku"
         matched_name += method == "name"
+
+    # Третий проход: сопоставление по модели. Нужен, потому что поставщики
+    # пишут названия по-разному («…, 80 PLUS Gold, белый (HA-850BA4-WH)» против
+    # «… HA-850BA4-WH») и артикулы в таблицах не совпадают.
+    linked_skus = {row["sku"] for row in result}
+    product_tokens: list[tuple[dict, set[str]]] = []
+    token_index: dict[str, set[int]] = {}
+    for product in products:
+        tokens = model_tokens(product["name"])
+        index = len(product_tokens)
+        product_tokens.append((product, tokens))
+        for token in tokens:
+            token_index.setdefault(token, set()).add(index)
+    for other in competitors:
+        tokens = model_tokens(other.get("name", ""))
+        if len(tokens) < 4 or not any(any(ch.isdigit() for ch in t) for t in tokens):
+            continue
+        candidates: set[int] | None = None
+        for token in sorted(tokens, key=lambda t: len(token_index.get(t, ()))):
+            ids = token_index.get(token) or set()
+            candidates = ids if candidates is None else candidates & ids
+            if not candidates:
+                break
+        if not candidates:
+            continue
+        for index in candidates:
+            product, product_words = product_tokens[index]
+            if not tokens <= product_words or product["sku"] in linked_skus:
+                continue
+            converted = other.copy()
+            converted["sku"] = product["sku"]
+            source_name = other.get("supplier") or "Прайс 482"
+            if not source_name.startswith("Прайс 482"):
+                source_name = f"Прайс 482 / {source_name}"
+            converted["supplier"] = source_name + " (совпадение по модели)"
+            key = (converted["sku"], converted["supplier"], converted["price_type"])
+            if key in used:
+                continue
+            used.add(key)
+            result.append(converted)
+            linked_skus.add(product["sku"])
+            matched_name += 1
     return result, matched_sku, matched_name
 
 
@@ -250,12 +416,32 @@ def parse_products(rows: list[list[str]], mapping: dict) -> tuple[list[dict], li
     headers = rows[header_row - 1]
     idx = resolve_columns(headers, PRODUCT_FIELDS, mapping.get("columns", {}))
     start_data_row = header_row
+    sections_in_sku = False
     if (idx["name"] is None or (idx["retail_price"] is None and idx["wholesale_price"] is None)) and not mapping.get("columns"):
         guess = infer_legacy_columns(rows)
         if guess:
             idx = {key: None for key in PRODUCT_FIELDS}
             idx.update({"sku": guess["sku"], "name": guess["name"], "retail_price": guess["price"]})
             start_data_row = 0
+
+    # Шапка нестандартная (как в реальном прайсе 379) — определяем колонки по данным.
+    if idx["name"] is None or (idx["retail_price"] is None and idx["wholesale_price"] is None):
+        detected = detect_columns(rows)
+        if detected:
+            idx = {key: None for key in PRODUCT_FIELDS}
+            idx["sku"] = detected["sku"]
+            idx["name"] = detected["name"]
+            prices = detected["prices"]
+            # Одна ценовая колонка = единая цена каталога: показываем её и как
+            # розничную, и как оптовую, чтобы не выдумывать второй тариф.
+            idx["retail_price"] = prices[0]
+            idx["wholesale_price"] = prices[0] if len(prices) == 1 else prices[1]
+            start_data_row = 0
+            sections_in_sku = True
+            log.info("Колонки определены по содержимому: артикул=%s, название=%s, цены=%s",
+                     chr(65 + detected["sku"]), chr(65 + detected["name"]),
+                     ", ".join(chr(65 + p) for p in prices))
+
     if idx["name"] is None or (idx["retail_price"] is None and idx["wholesale_price"] is None):
         raise ValueError("Не удалось определить колонки названия и цены. "
                          f"Столбцы Google-таблицы: {headers[:30]!r}. "
@@ -264,13 +450,23 @@ def parse_products(rows: list[list[str]], mapping: dict) -> tuple[list[dict], li
     other = []
     warnings: list[str] = []
     used: set[str] = set()
-    current_category = ""
-    current_subcategory = ""
+    sections = {"category": "", "subcategory": ""}
+    if sections_in_sku and rows:
+        # Первая строка прайса 379 — заголовок раздела («Код Блоки питания …»),
+        # а не товар: в ценовой колонке там текст «Опт цена».
+        first_row = rows[start_data_row]
+        if not _is_price_cell(cell(first_row, idx["retail_price"])):
+            apply_section(cell(first_row, idx["sku"]), sections)
+            start_data_row += 1
     for row_no, row in enumerate(rows[start_data_row:], start=start_data_row + 1):
         name = cell(row, idx["name"])
-        if not name:
-            continue
         sku = cell(row, idx["sku"])
+        if sections_in_sku:
+            if not name:
+                apply_section(sku, sections)
+                continue
+        elif not name:
+            continue
         retail = cell(row, idx["retail_price"])
         wholesale = cell(row, idx["wholesale_price"])
         cat = cell(row, idx["category"])
@@ -278,11 +474,11 @@ def parse_products(rows: list[list[str]], mapping: dict) -> tuple[list[dict], li
         if not retail and not wholesale:
             # Строка-разделитель в прайсе может содержать заголовок категории.
             if cat:
-                current_category = cat
+                sections["category"] = cat
             if sub:
-                current_subcategory = sub
+                sections["subcategory"] = sub
             if name in config.MENU_CATEGORIES:
-                current_category, current_subcategory = name, ""
+                sections["category"], sections["subcategory"] = name, ""
             continue
         try:
             r_value = price_number(retail) if retail else None
@@ -291,6 +487,8 @@ def parse_products(rows: list[list[str]], mapping: dict) -> tuple[list[dict], li
             if len(warnings) < 15:
                 warnings.append(f"строка {row_no}: {exc}")
             continue
+        current_category = sections["category"]
+        current_subcategory = sections["subcategory"]
         category = cat or current_category or category_guess(name)
         subcategory = sub or (current_subcategory if category == current_category else "") or subcategory_guess(category, name)
         # Для строк без артикула генерируем только ВНУТРЕННИЙ ключ, но не выдаём его за артикул.
@@ -386,7 +584,36 @@ class GoogleSheetSync:
         self.last_columns: list[str] = []
 
     @staticmethod
-    def _get_rows(sheet_id: str, gid: str) -> list[list[str]]:
+    def _fetch_export(sheet_id: str, gid: str) -> list[list[str]]:
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export"
+        response = requests.get(url, params={"format": "csv", "gid": gid}, timeout=25,
+                                headers={"User-Agent": "ComputerCatalogBot/1.0"})
+        response.raise_for_status()
+        if "html" in response.headers.get("content-type", "").lower() or response.text.lstrip().startswith("<!DOCTYPE html"):
+            raise PermissionError("Google отдал страницу входа вместо CSV. Откройте доступ на чтение "
+                                  "по ссылке или настройте GOOGLE_SERVICE_ACCOUNT_FILE")
+        if len(response.content) > 18_000_000:
+            raise ValueError("Вкладка слишком большая (более 18 МБ)")
+        response.encoding = "utf-8-sig"
+        return list(csv.reader(io.StringIO(response.text)))
+
+    @staticmethod
+    def _fetch_gviz(sheet_id: str, gid: str) -> list[list[str]]:
+        """Публичный CSV через Visualization API. Работает там, где /export отдаёт 400."""
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq"
+        response = requests.get(url, params={"tqx": "out:csv", "gid": gid}, timeout=25,
+                                headers={"User-Agent": "ComputerCatalogBot/1.0"})
+        response.raise_for_status()
+        text = response.text
+        if not text.strip() or text.lstrip().startswith(("<!DOCTYPE html", "<html")):
+            raise PermissionError("Google вернул страницу вместо CSV. Проверьте доступ к таблице.")
+        if "google.visualization.Query.setResponse" in text:
+            raise ValueError("Вкладка с указанным gid не найдена")
+        response.encoding = "utf-8-sig"
+        return list(csv.reader(io.StringIO(text)))
+
+    @classmethod
+    def _get_rows(cls, sheet_id: str, gid: str) -> list[list[str]]:
         if not re.fullmatch(r"[A-Za-z0-9_-]{20,}", sheet_id):
             raise ValueError("Некорректный GOOGLE_SHEET_ID")
         if not re.fullmatch(r"\d+", gid):
@@ -415,17 +642,21 @@ class GoogleSheetSync:
                 response = session.get(f"{base}/values/{range_name}", params={"majorDimension": "ROWS"}, timeout=25)
                 response.raise_for_status()
                 return [[str(item) for item in row] for row in response.json().get("values", [])]
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export"
-        response = requests.get(url, params={"format": "csv", "gid": gid}, timeout=25,
-                                headers={"User-Agent": "ComputerCatalogBot/1.0"})
-        response.raise_for_status()
-        if "html" in response.headers.get("content-type", "").lower() or response.text.lstrip().startswith("<!DOCTYPE html"):
-            raise PermissionError("Google отдал страницу входа вместо CSV. Откройте доступ на чтение "
-                                  "по ссылке или настройте GOOGLE_SERVICE_ACCOUNT_FILE")
-        if len(response.content) > 18_000_000:
-            raise ValueError("Вкладка слишком большая (более 18 МБ)")
-        response.encoding = "utf-8-sig"
-        return list(csv.reader(io.StringIO(response.text)))
+
+        # Таблица открыта по ссылке: пробуем /export, затем публичный gviz.
+        errors: list[str] = []
+        for fetch in (cls._fetch_export, cls._fetch_gviz):
+            try:
+                rows = fetch(sheet_id, gid)
+            except Exception as exc:  # noqa: BLE001 - нужен любой рабочий источник
+                errors.append(f"{fetch.__name__}: {exc}")
+                continue
+            if rows and any(any(cell.strip() for cell in row) for row in rows):
+                if len(str(rows)) > 18_000_000:
+                    raise ValueError("Вкладка слишком большая (более 18 МБ)")
+                return rows
+            errors.append(f"{fetch.__name__}: пустой ответ")
+        raise RuntimeError("Не удалось получить данные Google Sheets. " + "; ".join(errors))
 
     def headers(self) -> list[str]:
         rows = self._get_rows(config.GOOGLE_SHEET_ID, config.GOOGLE_SHEET_GID)
